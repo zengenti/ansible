@@ -92,8 +92,13 @@ class TaskQueueManager:
         # plugins for inter-process locking.
         self._connection_lockfile = tempfile.TemporaryFile()
 
+        num_hosts = len(inventory.get_hosts())
+        num_workers = self._options.forks
+        if num_workers > num_hosts:
+            num_workers = num_hosts
+
         self._workers = []
-        for i in range(self._options.forks):
+        for i in xrange(num_workers):
             main_q = multiprocessing.Queue()
             rslt_q = multiprocessing.Queue()
 
