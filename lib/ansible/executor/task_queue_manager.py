@@ -19,6 +19,7 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
+from multiprocessing.managers import SyncManager, DictProxy
 import multiprocessing
 import os
 import tempfile
@@ -32,6 +33,7 @@ from ansible.executor.stats import AggregateStats
 from ansible.playbook.play_context import PlayContext
 from ansible.plugins import callback_loader, strategy_loader, module_loader
 from ansible.template import Templar
+from ansible.vars.hostvars import HostVars
 
 try:
     from __main__ import display
@@ -91,14 +93,14 @@ class TaskQueueManager:
         # plugins for inter-process locking.
         self._connection_lockfile = tempfile.TemporaryFile()
 
-    def _initialize_processes(self, num):
+    def _initialize_processes(self, num, hostvars_manager):
         self._workers = []
 
         for i in xrange(num):
             main_q = multiprocessing.Queue()
             rslt_q = multiprocessing.Queue()
 
-            prc = WorkerProcess(self, main_q, rslt_q, self._loader)
+            prc = WorkerProcess(self, main_q, rslt_q, hostvars_manager, self._loader)
             prc.start()
 
             self._workers.append((prc, main_q, rslt_q))
@@ -173,10 +175,27 @@ class TaskQueueManager:
         are done with the current task).
         '''
 
+        class HostVarsManager(SyncManager):
+            pass
+
+        def get_hostvars():
+            return hostvars
+
+        hostvars = HostVars(
+            play=play,
+            inventory=self._inventory,
+            variable_manager=self._variable_manager,
+            loader=self._loader,
+        )
+
+        HostVarsManager.register('hostvars', get_hostvars, DictProxy)
+        hostvars_manager = HostVarsManager()
+        hostvars_manager.start()
+
         # Fork # of forks, # of hosts or serial, whichever is lowest
         contenders =  [self._options.forks, play.serial, len(self._inventory.get_hosts(play.hosts))]
         contenders =  [ v for v in contenders if v is not None and v > 0 ]
-        self._initialize_processes(min(contenders))
+        self._initialize_processes(min(contenders), hostvars_manager)
 
         if not self._callbacks_loaded:
             self.load_callbacks()

@@ -153,12 +153,29 @@ class StrategyBase:
             # way to share them with the forked processes
             shared_loader_obj = SharedPluginLoaderObj()
 
+            def dump_dict(obj, indent=0):
+                print("%sdict:" % (" "*indent,))
+                for k in obj.keys():
+                    dump_vars(obj[k], indent)
+
+            def dump_list(obj, indent=0):
+                print("%slist:" % (" "*indent,))
+                for item in obj:
+                    dump_vars(item, indent)
+
+            def dump_vars(obj, indent=0):
+                if isinstance(obj, dict):
+                    dump_dict(obj, indent+2)
+                elif isinstance(obj, list):
+                    dump_list(obj, indent+2)
+                else:
+                    print("%svar: %s (%s)" % (" "*indent, obj, type(obj)))
+
             # compress (and convert) the data if so configured, which can
             # help a lot when the variable dictionary is huge. We pop the
             # hostvars out of the task variables right now, due to the fact
             # that they're not JSON serializable
             compressed_vars = False
-            hostvars = task_vars.pop('hostvars', None)
             if C.DEFAULT_VAR_COMPRESSION_LEVEL > 0:
                 zip_vars = zlib.compress(json.dumps(task_vars), C.DEFAULT_VAR_COMPRESSION_LEVEL)
                 compressed_vars = True
@@ -170,10 +187,37 @@ class StrategyBase:
                 zip_vars = task_vars  # noqa (pyflakes false positive because task_vars is deleted in the conditional above)
 
             # and queue the task
-            main_q.put((host, task, self._loader.get_basedir(), zip_vars, hostvars, compressed_vars, play_context, shared_loader_obj), block=False)
+            if False: #C.DEFAULT_DEBUG:
+                print("vars has %d keys" % len(zip_vars.keys()))
+                print("vars are:")
+                dump_vars(zip_vars)
 
-            # nuke the hostvars object too, as its no longer needed
-            del hostvars
+                import datetime
+                import pickle
+                import cPickle
+                p1 = datetime.datetime.now()
+                d1 = cPickle.dumps(host, pickle.HIGHEST_PROTOCOL)
+                p2 = datetime.datetime.now()
+                d2 = cPickle.dumps(task, pickle.HIGHEST_PROTOCOL)
+                p3 = datetime.datetime.now()
+                d3 = cPickle.dumps(self._loader.get_basedir(), pickle.HIGHEST_PROTOCOL)
+                p4 = datetime.datetime.now()
+                d4 = cPickle.dumps(zip_vars, pickle.HIGHEST_PROTOCOL)
+                p5 = datetime.datetime.now()
+                d5 = cPickle.dumps(hostvars, pickle.HIGHEST_PROTOCOL)
+                p6 = datetime.datetime.now()
+                d6 = cPickle.dumps(play_context, pickle.HIGHEST_PROTOCOL)
+                p7 = datetime.datetime.now()
+                d7 = cPickle.dumps(shared_loader_obj, pickle.HIGHEST_PROTOCOL)
+                p8 = datetime.datetime.now()
+                print("time to serialize host: %s (size: %s)" % (p2-p1, len(d1)))
+                print("time to serialize task: %s (size: %s)" % (p3-p2, len(d2)))
+                print("time to serialize loader basedir: %s (size: %s)" % (p4-p3, len(d3)))
+                print("time to serialize vars: %s (size: %s)" % (p5-p4, len(d4)))
+                print("time to serialize hostvars: %s (size: %s)" % (p6-p5, len(d5)))
+                print("time to serialize play context: %s (size: %s)" % (p7-p6, len(d6)))
+                print("time to serialize shared plugin loader: %s (size: %s)" % (p8-p7, len(d7)))
+            main_q.put((host, task, self._loader.get_basedir(), zip_vars, compressed_vars, play_context, shared_loader_obj))
 
             self._pending_results += 1
         except (EOFError, IOError, AssertionError) as e:
@@ -192,7 +236,7 @@ class StrategyBase:
 
         while not self._final_q.empty() and not self._tqm._terminated:
             try:
-                result = self._final_q.get(block=False)
+                result = self._final_q.get()
                 display.debug("got result from result worker: %s" % ([text_type(x) for x in result],))
 
                 # all host status messages contain 2 entries: (msg, task_result)
@@ -311,7 +355,7 @@ class StrategyBase:
                 else:
                     raise AnsibleError("unknown result message received: %s" % result[0])
             except Queue.Empty:
-                time.sleep(0.01)
+                time.sleep(0.0001)
 
         return ret_results
 
@@ -327,7 +371,7 @@ class StrategyBase:
         while self._pending_results > 0 and not self._tqm._terminated:
             results = self._process_pending_results(iterator)
             ret_results.extend(results)
-            time.sleep(0.01)
+            time.sleep(0.0001)
         display.debug("no more pending results, returning what we have")
 
         return ret_results
