@@ -46,7 +46,6 @@ __all__ = ['HostVars']
 class HostVars(collections.Mapping):
     ''' A special view of vars_cache that adds values from the inventory when needed. '''
 
-    _exposed_ = ('__getitem__', '__contains__', '__iter__', '__len__')
     def __init__(self, play, inventory, variable_manager, loader):
         self._lookup = dict()
         self._inventory = inventory
@@ -54,6 +53,9 @@ class HostVars(collections.Mapping):
         self._play = play
         self._variable_manager = variable_manager
         self._cached_result = dict()
+
+    def set_variable_manager(self, variable_manager):
+        self._variable_manager = variable_manager
 
     def _find_host(self, host_name):
         return self._inventory.get_host(host_name)
@@ -66,18 +68,18 @@ class HostVars(collections.Mapping):
         data = self._variable_manager.get_vars(loader=self._loader, host=host, play=self._play, include_hostvars=False)
 
         # Using cache in order to avoid template call
-        sha1_hash = sha1(str(data).encode('utf-8')).hexdigest()
-        if sha1_hash in self._cached_result:
-            result = self._cached_result[sha1_hash]
-        else:
-            templar = Templar(variables=data, loader=self._loader)
-            result = templar.template(data, fail_on_undefined=False, static_vars=STATIC_VARS)
-            self._cached_result[sha1_hash] = result
-
-        return result
+        #sha1_hash = sha1(str(data).encode('utf-8')).hexdigest()
+        #if sha1_hash in self._cached_result:
+        #    result = self._cached_result[sha1_hash]
+        #else:
+        #    templar = Templar(variables=data, loader=self._loader)
+        #    result = templar.template(data, fail_on_undefined=False, static_vars=STATIC_VARS)
+        #    self._cached_result[sha1_hash] = result
+        #return result
+        return data
 
     def __contains__(self, host_name):
-        return True #self._find_host(host_name) is not None
+        return self._find_host(host_name) is not None
 
     def __iter__(self):
         for host in self._inventory.get_hosts(ignore_limits_and_restrictions=True):

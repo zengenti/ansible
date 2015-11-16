@@ -107,6 +107,7 @@ class WorkerProcess(multiprocessing.Process):
                     job_vars = json.loads(zlib.decompress(zip_vars))
                 else:
                     job_vars = zip_vars
+
                 job_vars['hostvars'] = self._hostvars.hostvars()
 
                 debug("there's work to be done! got a task/handler to work on: %s" % task)

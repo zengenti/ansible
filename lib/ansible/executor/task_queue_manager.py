@@ -93,14 +93,14 @@ class TaskQueueManager:
         # plugins for inter-process locking.
         self._connection_lockfile = tempfile.TemporaryFile()
 
-    def _initialize_processes(self, num, hostvars_manager):
+    def _initialize_processes(self, num):
         self._workers = []
 
         for i in xrange(num):
             main_q = multiprocessing.Queue()
             rslt_q = multiprocessing.Queue()
 
-            prc = WorkerProcess(self, main_q, rslt_q, hostvars_manager, self._loader)
+            prc = WorkerProcess(self, main_q, rslt_q, self._hostvars_manager, self._loader)
             prc.start()
 
             self._workers.append((prc, main_q, rslt_q))
@@ -175,28 +175,6 @@ class TaskQueueManager:
         are done with the current task).
         '''
 
-        class HostVarsManager(SyncManager):
-            pass
-
-        def get_hostvars():
-            return hostvars
-
-        hostvars = HostVars(
-            play=play,
-            inventory=self._inventory,
-            variable_manager=self._variable_manager,
-            loader=self._loader,
-        )
-
-        HostVarsManager.register('hostvars', get_hostvars, DictProxy)
-        hostvars_manager = HostVarsManager()
-        hostvars_manager.start()
-
-        # Fork # of forks, # of hosts or serial, whichever is lowest
-        contenders =  [self._options.forks, play.serial, len(self._inventory.get_hosts(play.hosts))]
-        contenders =  [ v for v in contenders if v is not None and v > 0 ]
-        self._initialize_processes(min(contenders), hostvars_manager)
-
         if not self._callbacks_loaded:
             self.load_callbacks()
 
@@ -205,6 +183,34 @@ class TaskQueueManager:
 
         new_play = play.copy()
         new_play.post_validate(templar)
+
+        class HostVarsManager(SyncManager):
+            pass
+
+        hostvars = HostVars(
+            play=new_play,
+            inventory=self._inventory,
+            variable_manager=self._variable_manager,
+            loader=self._loader,
+        )
+
+        HostVarsManager.register(
+            'hostvars',
+            callable=lambda: hostvars,
+            # FIXME: this is the list of exposed methods to the DictProxy object, plus our
+            #        one special one (set_variable_manager). There's probably a better way
+            #        to do this with a proper BaseProxy/DictProxy derivative
+            exposed=('set_variable_manager', '__contains__', '__delitem__', '__getitem__',
+                     '__len__', '__setitem__', 'clear', 'copy', 'get', 'has_key', 'items',
+                     'keys', 'pop', 'popitem', 'setdefault', 'update', 'values'),
+        )
+        self._hostvars_manager = HostVarsManager()
+        self._hostvars_manager.start()
+
+        # Fork # of forks, # of hosts or serial, whichever is lowest
+        contenders =  [self._options.forks, play.serial, len(self._inventory.get_hosts(new_play.hosts))]
+        contenders =  [ v for v in contenders if v is not None and v > 0 ]
+        self._initialize_processes(min(contenders))
 
         play_context = PlayContext(new_play, self._options, self.passwords, self._connection_lockfile.fileno())
         for callback_plugin in self._callback_plugins:
@@ -240,6 +246,7 @@ class TaskQueueManager:
         # and run the play using the strategy and cleanup on way out
         play_return = strategy.run(iterator, play_context)
         self._cleanup_processes()
+        self._hostvars_manager.shutdown()
         return play_return
 
     def cleanup(self):
