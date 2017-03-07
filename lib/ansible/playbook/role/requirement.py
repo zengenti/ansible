@@ -83,8 +83,7 @@ class RoleRequirement(RoleDefinition):
         #   'version': 'v1.0',
         #   'name': 'repo'
         # }
-
-        display.deprecated("The comma separated role spec format, use the yaml/explicit format instead.")
+        display.deprecated("The comma separated role spec format, use the yaml/explicit format instead. Line that trigger this: %s" % role_spec)
 
         default_role_versions = dict(git='master', hg='tip')
 
@@ -145,8 +144,13 @@ class RoleRequirement(RoleDefinition):
             return dict(name=name, src=src, scm=scm, version=version)
 
         if 'role' in role:
-            # Old style: {role: "galaxy.role,version,name", other_vars: "here" }
-            role = RoleRequirement.role_spec_parse(role['role'])
+            name = role['role']
+            if ',' in name:
+                # Old style: {role: "galaxy.role,version,name", other_vars: "here" }
+                role = RoleRequirement.role_spec_parse(role['role'])
+            else:
+                del role['role']
+                role['name'] = name
         else:
             role = role.copy()
 
@@ -169,7 +173,7 @@ class RoleRequirement(RoleDefinition):
             if 'scm' not in role:
                 role['scm'] = None
 
-        for key in role.keys():
+        for key in list(role.keys()):
             if key not in VALID_SPEC_KEYS:
                 role.pop(key)
 
@@ -189,6 +193,17 @@ class RoleRequirement(RoleDefinition):
             rc = popen.wait()
         if rc != 0:
             raise AnsibleError ("- command %s failed in directory %s (rc=%s)" % (' '.join(clone_cmd), tempdir, rc))
+
+        if scm == 'git' and version:
+            checkout_cmd = [scm, 'checkout', version]
+            with open('/dev/null', 'w') as devnull:
+                try:
+                    popen = subprocess.Popen(checkout_cmd, cwd=os.path.join(tempdir, name), stdout=devnull, stderr=devnull)
+                except (IOError, OSError):
+                    raise AnsibleError("error executing: %s" % " ".join(checkout_cmd))
+                rc = popen.wait()
+            if rc != 0:
+                raise AnsibleError("- command %s failed in directory %s (rc=%s)" % (' '.join(checkout_cmd), tempdir, rc))
 
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.tar')
         if scm == 'hg':

@@ -19,22 +19,28 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-import json
 import difflib
+import json
+import sys
 import warnings
 from copy import deepcopy
 
-from ansible.compat.six import string_types
-
 from ansible import constants as C
+from ansible.module_utils._text import to_text
+from ansible.utils.color import stringc
 from ansible.vars import strip_internal_keys
-from ansible.utils.unicode import to_unicode
 
 try:
     from __main__ import display as global_display
 except ImportError:
     from ansible.utils.display import Display
     global_display = Display()
+
+try:
+    from __main__ import cli
+except ImportError:
+    # using API w/o cli
+    cli = False
 
 __all__ = ["CallbackBase"]
 
@@ -53,21 +59,25 @@ class CallbackBase:
         else:
             self._display = global_display
 
+        if cli:
+            self._options = cli.options
+        else:
+            self._options = None
+
         if self._display.verbosity >= 4:
             name = getattr(self, 'CALLBACK_NAME', 'unnamed')
             ctype = getattr(self, 'CALLBACK_TYPE', 'old')
             version = getattr(self, 'CALLBACK_VERSION', '1.0')
-            self._display.vvvv('Loaded callback %s of type %s, v%s' % (name, ctype, version))
+            self._display.vvvv('Loading callback plugin %s of type %s, v%s from %s' % (name, ctype, version, __file__))
 
-    def _copy_result(self, result):
-        ''' helper for callbacks, so they don't all have to include deepcopy '''
-        return deepcopy(result)
+    ''' helper for callbacks, so they don't all have to include deepcopy '''
+    _copy_result = deepcopy
 
     def _dump_results(self, result, indent=None, sort_keys=True, keep_invocation=False):
         if result.get('_ansible_no_log', False):
             return json.dumps(dict(censored="the output has been hidden due to the fact that 'no_log: true' was specified for this result"))
 
-        if not indent and '_ansible_verbose_always' in result and result['_ansible_verbose_always']:
+        if not indent and (result.get('_ansible_verbose_always') or self._display.verbosity > 2):
             indent = 4
 
         # All result keys stating with _ansible_ are internal, so remove them from the result before we output anything.
@@ -77,13 +87,41 @@ class CallbackBase:
         if not keep_invocation and self._display.verbosity < 3 and 'invocation' in result:
             del abridged_result['invocation']
 
+        # remove diff information from screen output
+        if self._display.verbosity < 3 and 'diff' in result:
+            del abridged_result['diff']
+
+        # remove exception from screen output
+        if 'exception' in abridged_result:
+            del abridged_result['exception']
+
         return json.dumps(abridged_result, indent=indent, ensure_ascii=False, sort_keys=sort_keys)
 
     def _handle_warnings(self, res):
         ''' display warnings, if enabled and any exist in the result '''
-        if C.COMMAND_WARNINGS and 'warnings' in res and res['warnings']:
-            for warning in res['warnings']:
-                self._display.warning(warning)
+        if C.COMMAND_WARNINGS:
+            if 'warnings' in res and res['warnings']:
+                for warning in res['warnings']:
+                    self._display.warning(warning)
+                del res['warnings']
+            if 'deprecations' in res and res['deprecations']:
+                for warning in res['deprecations']:
+                    self._display.deprecated(**warning)
+                del res['deprecations']
+
+    def _handle_exception(self, result):
+
+        if 'exception' in result:
+            msg = "An exception occurred during task execution. "
+            if self._display.verbosity < 3:
+                # extract just the actual error message from the exception text
+                error = result['exception'].strip().split('\n')[-1]
+                msg += "To see the full traceback, use -vvv. The error was: %s" % error
+            else:
+                msg = "The full traceback is:\n" + result['exception']
+                del result['exception']
+
+            self._display.display(msg, color=C.COLOR_ERROR)
 
     def _get_diff(self, difflist):
 
@@ -95,7 +133,6 @@ class CallbackBase:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    ret = []
                     if 'dst_binary' in diff:
                         ret.append("diff skipped: destination file appears to be binary\n")
                     if 'src_binary' in diff:
@@ -105,6 +142,10 @@ class CallbackBase:
                     if 'src_larger' in diff:
                         ret.append("diff skipped: source file size is greater than %d\n" % diff['src_larger'])
                     if 'before' in diff and 'after' in diff:
+                        # format complex structures into 'files'
+                        for x in ['before', 'after']:
+                            if isinstance(diff[x], dict):
+                                diff[x] = json.dumps(diff[x], sort_keys=True, indent=4, separators=(',', ': ')) + '\n'
                         if 'before_header' in diff:
                             before_header = "before: %s" % diff['before_header']
                         else:
@@ -113,38 +154,63 @@ class CallbackBase:
                             after_header = "after: %s" % diff['after_header']
                         else:
                             after_header = 'after'
-                        differ = difflib.unified_diff(to_unicode(diff['before']).splitlines(True), to_unicode(diff['after']).splitlines(True), before_header, after_header, '', '', 10)
-                        ret.extend(list(differ))
-                        ret.append('\n')
-                    return u"".join(ret)
+                        before_lines = to_text(diff['before']).splitlines(True)
+                        after_lines = to_text(diff['after']).splitlines(True)
+                        if before_lines and not before_lines[-1].endswith('\n'):
+                            before_lines[-1] += '\n\\ No newline at end of file\n'
+                        if after_lines and not after_lines[-1].endswith('\n'):
+                            after_lines[-1] += '\n\\ No newline at end of file\n'
+                        differ = difflib.unified_diff(before_lines,
+                                                      after_lines,
+                                                      fromfile=before_header,
+                                                      tofile=after_header,
+                                                      fromfiledate='',
+                                                      tofiledate='',
+                                                      n=C.DIFF_CONTEXT)
+                        difflines = list(differ)
+                        if len(difflines) >= 3 and sys.version_info[:2] == (2, 6):
+                            # difflib in Python 2.6 adds trailing spaces after
+                            # filenames in the -- before/++ after headers.
+                            difflines[0] = difflines[0].replace(' \n', '\n')
+                            difflines[1] = difflines[1].replace(' \n', '\n')
+                            # it also treats empty files differently
+                            difflines[2] = difflines[2].replace('-1,0', '-0,0').replace('+1,0', '+0,0')
+                        has_diff = False
+                        for line in difflines:
+                            has_diff = True
+                            if line.startswith('+'):
+                                line = stringc(line, C.COLOR_DIFF_ADD)
+                            elif line.startswith('-'):
+                                line = stringc(line, C.COLOR_DIFF_REMOVE)
+                            elif line.startswith('@@'):
+                                line = stringc(line, C.COLOR_DIFF_LINES)
+                            ret.append(line)
+                        if has_diff:
+                            ret.append('\n')
+                    if 'prepared' in diff:
+                        ret.append(to_text(diff['prepared']))
             except UnicodeDecodeError:
                 ret.append(">> the files are different, but the diff library cannot compare unicode strings\n\n")
+        return u''.join(ret)
 
     def _get_item(self, result):
         if result.get('_ansible_no_log', False):
             item = "(censored due to no_log)"
+        elif result.get('_ansible_item_label', False):
+            item = result.get('_ansible_item_label')
         else:
             item = result.get('item', None)
 
         return item
 
     def _process_items(self, result):
-        for res in result._result['results']:
-            newres = self._copy_result(result)
-            res['item'] = self._get_item(res)
-            newres._result = res
-            if 'failed' in res and res['failed']:
-                self.v2_playbook_item_on_failed(newres)
-            elif 'skipped' in res and res['skipped']:
-                self.v2_playbook_item_on_skipped(newres)
-            else:
-                self.v2_playbook_item_on_ok(newres)
+        # just remove them as now they get handled by individual callbacks
+        del result._result['results']
 
     def _clean_results(self, result, task_name):
-        if 'changed' in result and task_name in ['debug']:
-            del result['changed']
         if 'invocation' in result and task_name in ['debug']:
             del result['invocation']
+
 
     def set_play_context(self, play_context):
         pass
@@ -270,7 +336,7 @@ class CallbackBase:
         self.playbook_on_no_hosts_remaining()
 
     def v2_playbook_on_task_start(self, task, is_conditional):
-        self.playbook_on_task_start(task, is_conditional)
+        self.playbook_on_task_start(task.name, is_conditional)
 
     def v2_playbook_on_cleanup_task_start(self, task):
         pass #no v1 correspondance
@@ -299,27 +365,21 @@ class CallbackBase:
         self.playbook_on_stats(stats)
 
     def v2_on_file_diff(self, result):
-        host = result._host.get_name()
         if 'diff' in result._result:
+            host = result._host.get_name()
             self.on_file_diff(host, result._result['diff'])
-
-    def v2_playbook_on_item_ok(self, result):
-        pass # no v1
-
-    def v2_playbook_on_item_failed(self, result):
-        pass # no v1
-
-    def v2_playbook_on_item_skipped(self, result):
-        pass # no v1
 
     def v2_playbook_on_include(self, included_file):
         pass #no v1 correspondance
 
-    def v2_playbook_item_on_ok(self, result):
+    def v2_runner_item_on_ok(self, result):
         pass
 
-    def v2_playbook_item_on_failed(self, result):
+    def v2_runner_item_on_failed(self, result):
         pass
 
-    def v2_playbook_item_on_skipped(self, result):
+    def v2_runner_item_on_skipped(self, result):
+        pass
+
+    def v2_runner_retry(self, result):
         pass
