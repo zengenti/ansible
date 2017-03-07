@@ -33,7 +33,6 @@
     releases.  Do not use this unless you are willing to port your module code.
 """
 import codecs
-
 from ansible.module_utils.six import PY3, text_type, binary_type
 
 
@@ -174,7 +173,18 @@ def to_text(obj, encoding='utf-8', errors=None, nonstring='simplerepr'):
             errors = 'strict'
 
     if isinstance(obj, binary_type):
-        return obj.decode(encoding, errors)
+        try:
+            return obj.decode(encoding, errors)
+        except UnicodeDecodeError as err:
+            #print("decode error" + encoding)
+            #pprint(err)
+            if obj.startswith(codecs.BOM_UTF8):
+                return obj[len(codecs.BOM_UTF8):].decode('utf-8')
+            if obj.startswith(codecs.BOM_UTF16_LE):
+                return obj[len(codecs.BOM_UTF16_LE):].decode('utf-16-le')
+            if obj.startswith(codecs.BOM_UTF16_BE):
+                return obj[len(codecs.BOM_UTF16_BE):].decode('utf-16-be')
+            return u''   
 
     # Note: We do these last even though we have to call to_text again on the
     # value because we're optimizing the common case
